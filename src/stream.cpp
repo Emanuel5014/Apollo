@@ -30,6 +30,7 @@ extern "C" {
 #include "platform/common.h"
 #include "process.h"
 #include "stream.h"
+#include "streamfork_clipboard.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -53,6 +54,10 @@ extern "C" {
 #define IDX_SET_CLIPBOARD 16
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 17
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
+#define IDX_STREAMFORK_CLIPBOARD_H2C 19
+#define IDX_STREAMFORK_CLIPBOARD_C2H 20
+#define IDX_STREAMFORK_HELLO 21
+#define IDX_STREAMFORK_HELLO_ACK 22
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -74,6 +79,10 @@ static const short packetTypes[] = {
   0x3001,  // Set Clipboard (Apollo protocol extension)
   0x3002,  // File transfer nonce request (Apollo protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
+  streamfork::PTYPE_CLIPBOARD_H2C,  // Clipboard host->client (streamfork protocol extension)
+  streamfork::PTYPE_CLIPBOARD_C2H,  // Clipboard client->host (streamfork protocol extension)
+  streamfork::PTYPE_HELLO,  // Hello (streamfork protocol extension)
+  streamfork::PTYPE_HELLO_ACK,  // HelloAck (streamfork protocol extension)
 };
 
 namespace asio = boost::asio;
@@ -415,6 +424,8 @@ namespace stream {
     std::string device_name;
     std::string device_uuid;
     crypto::PERM permission;
+
+    streamfork::clipboard::session_state_t streamfork_clipboard;
 
     std::list<crypto::command_entry_t> do_cmds;
     std::list<crypto::command_entry_t> undo_cmds;
@@ -927,6 +938,58 @@ namespace stream {
     return 0;
   }
 
+  /**
+   * @brief Send a streamfork control message of variable size (up to a clipboard chunk).
+   */
+  int send_streamfork_msg(session_t *session, std::uint16_t type, const std::string_view &data) {
+    if (!session->control.peer) {
+      return -1;
+    }
+
+    std::vector<std::uint8_t> plaintext(sizeof(control_header_v2) + data.size());
+    auto header = (control_header_v2 *) plaintext.data();
+    header->type = type;
+    header->payloadLength = (std::uint16_t) data.size();
+    std::copy(std::begin(data), std::end(data), header->payload());
+
+    // Large enough for the biggest clipboard chunk, so it lives on the heap
+    using encrypted_payload_t = std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(control_header_v2) + streamfork::CLIPBOARD_HEADER_SIZE + streamfork::CLIPBOARD_MAX_CHUNK) + crypto::cipher::tag_size>;
+    auto encrypted_payload = std::make_unique<encrypted_payload_t>();
+
+    auto payload = encode_control(session, std::string_view {(char *) plaintext.data(), plaintext.size()}, *encrypted_payload);
+    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+      TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
+      BOOST_LOG(warning) << "Couldn't send streamfork message "sv << util::hex(type).to_string_view() << " to ["sv << addr << ':' << port << ']';
+
+      return -1;
+    }
+
+    return 0;
+  }
+
+  /**
+   * @brief Push the host clipboard to a client if it changed and the client negotiated it.
+   */
+  void push_streamfork_clipboard(session_t *session) {
+    auto &state = session->streamfork_clipboard;
+    if (!(state.capabilities & streamfork::CAP_CLIPBOARD_TO_CLIENT) || !(session->permission & crypto::PERM::clipboard_read)) {
+      return;
+    }
+
+    auto text = streamfork::clipboard::pending_for(state);
+    if (!text) {
+      return;
+    }
+
+    for (const auto &chunk : streamfork::clipboard::make_chunks(state, streamfork::CLIPBOARD_FORMAT_TEXT, *text)) {
+      if (send_streamfork_msg(session, packetTypes[IDX_STREAMFORK_CLIPBOARD_H2C], chunk)) {
+        return;
+      }
+    }
+
+    BOOST_LOG(debug) << "Pushed host clipboard to ["sv << session->device_name << "] ("sv << text->size() << " bytes)"sv;
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1035,12 +1098,51 @@ namespace stream {
     });
 
     server->map(packetTypes[IDX_SET_CLIPBOARD], [server](session_t *session, const std::string_view &payload) {
-      BOOST_LOG(info) << "type [IDX_SET_CLIPBOARD]: "sv << payload << " size: " << payload.size();
+      // Never log the content of the clipboard
+      BOOST_LOG(debug) << "type [IDX_SET_CLIPBOARD] size: "sv << payload.size();
 
       if (!(session->permission & crypto::PERM::clipboard_set)) {
         BOOST_LOG(debug) << "Permission Clipboard Set deined for [" << session->device_name << "]";
         return;
       }
+    });
+
+    server->map(packetTypes[IDX_STREAMFORK_HELLO], [](session_t *session, const std::string_view &payload) {
+      if (payload.size() < 1 + sizeof(std::uint32_t)) {
+        BOOST_LOG(warning) << "Discarding runt streamfork Hello"sv;
+        return;
+      }
+
+      auto version = (std::uint8_t) payload[0];
+      std::uint32_t requested;
+      std::memcpy(&requested, payload.data() + 1, sizeof(requested));
+      requested = util::endian::little(requested);
+
+      std::uint32_t granted = 0;
+      if (config::stream.clipboard_push) {
+        granted = streamfork::clipboard::negotiate(session->streamfork_clipboard, requested,
+                                                   !!(session->permission & crypto::PERM::clipboard_read),
+                                                   !!(session->permission & crypto::PERM::clipboard_set));
+      }
+
+      BOOST_LOG(info) << "streamfork Hello from ["sv << session->device_name << "] (version "sv << (int) version
+                      << "): requested "sv << util::hex(requested).to_string_view() << ", granted "sv << util::hex(granted).to_string_view();
+
+      std::string ack;
+      ack += (char) streamfork::PROTOCOL_VERSION;
+      auto granted_le = util::endian::little(granted);
+      ack.append((const char *) &granted_le, sizeof(granted_le));
+      send_streamfork_msg(session, packetTypes[IDX_STREAMFORK_HELLO_ACK], ack);
+    });
+
+    server->map(packetTypes[IDX_STREAMFORK_CLIPBOARD_C2H], [](session_t *session, const std::string_view &payload) {
+      if (!(session->streamfork_clipboard.capabilities & streamfork::CAP_CLIPBOARD_TO_HOST) ||
+          !(session->permission & crypto::PERM::clipboard_set)) {
+        BOOST_LOG(debug) << "Clipboard push denied for ["sv << session->device_name << ']';
+        return;
+      }
+
+      streamfork::clipboard::receive_chunk(session->streamfork_clipboard, payload);
     });
 
     server->map(packetTypes[IDX_FILE_TRANSFER_NONCE_REQUEST], [server](session_t *session, const std::string_view &payload) {
@@ -1118,6 +1220,14 @@ namespace stream {
       }
     });
 
+    // Watch the host clipboard for the streamfork clipboard push while the control stream runs
+    if (config::stream.clipboard_push) {
+      streamfork::clipboard::start();
+    }
+    auto clipboard_guard = util::fail_guard([]() {
+      streamfork::clipboard::stop();
+    });
+
     // This thread handles latency-sensitive control messages
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
@@ -1183,6 +1293,8 @@ namespace stream {
 
               send_hdr_mode(session, std::move(hdr_info));
             }
+
+            push_streamfork_clipboard(session);
           }
 
           ++pos;

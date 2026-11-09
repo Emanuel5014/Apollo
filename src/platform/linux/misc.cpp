@@ -1074,4 +1074,10 @@ std::string get_local_ip_for_gateway() {
     // Placeholder
     return false;
   }
+
+  std::unique_ptr<deinit_t>
+  watch_clipboard(std::function<void(std::string)> on_text_changed) {
+    // Not implemented
+    return nullptr;
+  }
 }  // namespace platf

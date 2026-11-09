@@ -174,6 +174,9 @@ namespace config {
     // Video encryption settings for LAN and WAN streams
     int lan_encryption_mode;
     int wan_encryption_mode;
+
+    // Push clipboard changes between host and clients that support it (streamfork)
+    bool clipboard_push;
   };
 
   struct nvhttp_t {

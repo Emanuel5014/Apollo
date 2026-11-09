@@ -878,4 +878,12 @@ namespace platf {
   bool
   set_clipboard(const std::string& content);
 
+  /**
+   * @brief Watch the clipboard for text changes (streamfork clipboard push).
+   * @param on_text_changed Called from a platform thread with the new UTF-8 text (LF line endings).
+   * @return An object that stops watching when destroyed, or nullptr if unsupported.
+   */
+  std::unique_ptr<deinit_t>
+  watch_clipboard(std::function<void(std::string)> on_text_changed);
+
 }  // namespace platf
