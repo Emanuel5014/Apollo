@@ -826,11 +826,9 @@ namespace video {
       },
       {
         // SDR-specific options
-        {"profile"s, [](const config_t &cfg) {
-           if (cfg.profile == 66) return "baseline"s;
-           if (cfg.profile == 77) return "main"s;
-           return "high"s;
-         }},
+        // Apollo's config_t has no H.264 profile field (the client doesn't negotiate one),
+        // so always use the High profile.
+        {"profile"s, "high"s},
       },
       {},  // HDR-specific options
       {},  // YUV444 SDR-specific options
