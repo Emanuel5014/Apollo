@@ -325,8 +325,12 @@ namespace video {
     avcodec_encode_session_t(avcodec_encode_session_t &&other) noexcept = default;
 
     ~avcodec_encode_session_t() {
-      // Flush any remaining frames in the encoder
-      if (avcodec_send_frame(avcodec_ctx.get(), nullptr) == 0) {
+      // Flush any remaining frames in the encoder if the encoder started up (frame num > 0).
+      // AMF never signals the end of the stream on some GPUs/drivers (seen on an RX 5700 XT),
+      // so avcodec_receive_packet() blocked forever here and the encoder probe hung at startup.
+      // We drop the pending AMF frames instead, since the session is going away anyway.
+      bool is_amf = avcodec_ctx && avcodec_ctx->codec && std::string_view {avcodec_ctx->codec->name}.ends_with("_amf"sv);
+      if (avcodec_ctx && avcodec_ctx->frame_num > 0 && !is_amf && avcodec_send_frame(avcodec_ctx.get(), nullptr) == 0) {
         packet_raw_avcodec pkt;
         while (avcodec_receive_packet(avcodec_ctx.get(), pkt.av_packet) == 0);
       }
