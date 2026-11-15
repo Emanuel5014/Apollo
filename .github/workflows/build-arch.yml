@@ -33,6 +33,13 @@ jobs:
             -e 's/export CXX="g++-${_gcc_version}"/export CXX=g++/' \
             -e 's/-D BUILD_WERROR=ON/-D BUILD_WERROR=OFF/' \
             packaging/linux/Arch/PKGBUILD
+          # Apollo asks for exactly Boost 1.89, whose bundled CMake files fail with the CMake shipped by Arch.
+          # Use the Boost package of Arch instead.
+          sed -i \
+            -e "s/^  'cmake'$/  'boost'\n  'cmake'/" \
+            -e 's|^    git submodule update --recursive --init$|&\n    sed -i "s/ EXACT COMPONENTS/ COMPONENTS/" cmake/dependencies/Boost_Sunshine.cmake|' \
+            packaging/linux/Arch/PKGBUILD
+          sed -n '/^makedepends/,/^)/p;/^prepare/,/^}/p' packaging/linux/Arch/PKGBUILD
           grep -nE "gcc|CC=|CXX=|WERROR" packaging/linux/Arch/PKGBUILD
           docker buildx build \
             --file docker/archlinux.dockerfile \
