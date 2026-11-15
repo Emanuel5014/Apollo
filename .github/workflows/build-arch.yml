@@ -25,6 +25,15 @@ jobs:
         run: |
           # Unit tests are not maintained for Linux in Apollo: build and package only
           sed -i 's/^ENV _run_unit_tests=true/ENV _run_unit_tests=false/' docker/archlinux.dockerfile
+          # gcc14 is no longer in the Arch repositories: build with the system gcc. With a newer gcc
+          # than upstream tests, new warnings would fail the build, so don't treat them as errors.
+          sed -i \
+            -e 's/"gcc${_gcc_version}"/'"'"'gcc'"'"'/' \
+            -e 's/export CC="gcc-${_gcc_version}"/export CC=gcc/' \
+            -e 's/export CXX="g++-${_gcc_version}"/export CXX=g++/' \
+            -e 's/-D BUILD_WERROR=ON/-D BUILD_WERROR=OFF/' \
+            packaging/linux/Arch/PKGBUILD
+          grep -nE "gcc|CC=|CXX=|WERROR" packaging/linux/Arch/PKGBUILD
           docker buildx build \
             --file docker/archlinux.dockerfile \
             --target sunshine \
