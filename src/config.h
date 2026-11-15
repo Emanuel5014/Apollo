@@ -177,6 +177,9 @@ namespace config {
 
     // Push clipboard changes between host and clients that support it (streamfork)
     bool clipboard_push;
+
+    // Spread each video frame at this rate instead of ~800 Mbps, 0 = off (streamfork, see streamfork_pacing.h)
+    int packet_pacing_mbps;
   };
 
   struct nvhttp_t {

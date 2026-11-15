@@ -31,6 +31,7 @@ extern "C" {
 #include "process.h"
 #include "stream.h"
 #include "streamfork_clipboard.h"
+#include "streamfork_pacing.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -1585,8 +1586,32 @@ namespace stream {
         // Generic Segmentation Offload on Linux can't do more than 64.
         send_batch_size = std::min<size_t>(64, send_batch_size);
 
+        // Duration of a pacing group of ratecontrol_packets_in_1ms packets
+        auto ratecontrol_group_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(1ms);
+
         // Don't ignore the last ratecontrol group of the previous frame
         auto ratecontrol_frame_start = std::max(ratecontrol_next_frame_start, std::chrono::steady_clock::now());
+
+        // streamfork: optional slower pacing for Wi-Fi (packet_pacing_mbps), see streamfork_pacing.h
+        if (config::stream.packet_pacing_mbps > 0) {
+          size_t frame_packets = 0;
+          std::for_each(fec_blocks_begin, fec_blocks_end, [&](const std::string_view &block) {
+            frame_packets += streamfork::pacing::block_packet_count(block.size(), blocksize, fecPercentage, session->config.minRequiredFecPackets);
+          });
+
+          auto pacing = streamfork::pacing::compute(
+            {config::stream.packet_pacing_mbps, (size_t) blocksize, frame_packets, session->config.monitor.framerate, ratecontrol_frame_start - std::chrono::steady_clock::now()},
+            {ratecontrol_packets_in_1ms, ratecontrol_group_duration, send_batch_size}
+          );
+          ratecontrol_packets_in_1ms = pacing.rate.packets_per_group;
+          ratecontrol_group_duration = pacing.rate.group_duration;
+          send_batch_size = pacing.rate.send_batch_size;
+
+          if (pacing.floor_raised) {
+            BOOST_LOG(debug) << "Packet pacing: frame "sv << packet->frame_index() << " ("sv << frame_packets << " packets) sent at "sv
+                             << pacing.rate_bps / 1000000 << " Mbps instead of "sv << config::stream.packet_pacing_mbps << " to fit the frame budget"sv;
+          }
+        }
 
         size_t ratecontrol_frame_packets_sent = 0;
         size_t ratecontrol_group_packets_sent = 0;
@@ -1690,7 +1715,7 @@ namespace stream {
               if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms ||
                   ratecontrol_frame_packets_sent == 0) {
                 auto due = ratecontrol_frame_start +
-                           std::chrono::duration_cast<std::chrono::nanoseconds>(1ms) *
+                           ratecontrol_group_duration *
                              ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;
 
                 auto now = std::chrono::steady_clock::now();
@@ -1735,7 +1760,7 @@ namespace stream {
 
           // remember this in case the next frame comes immediately
           ratecontrol_next_frame_start = ratecontrol_frame_start +
-                                         std::chrono::duration_cast<std::chrono::nanoseconds>(1ms) *
+                                         ratecontrol_group_duration *
                                            ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;
 
           frame_network_latency_logger.second_point_now_and_log();
@@ -2223,6 +2248,10 @@ namespace stream {
       session.audio.peer.port(0);
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
+
+      if (config::stream.packet_pacing_mbps > 0) {
+        BOOST_LOG(info) << streamfork::pacing::describe(config::stream.packet_pacing_mbps, session.config.packetsize + MAX_RTP_HEADER_SIZE, session.config.monitor.framerate);
+      }
 
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};

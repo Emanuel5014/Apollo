@@ -538,6 +538,7 @@ namespace config {
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
 
     true,  // clipboard_push
+    0,  // packet_pacing_mbps
   };
 
   nvhttp_t nvhttp {
@@ -1248,6 +1249,7 @@ namespace config {
     path_f(vars, "file_apps", stream.file_apps);
     int_between_f(vars, "fec_percentage", stream.fec_percentage, {1, 255});
     bool_f(vars, "clipboard_push", stream.clipboard_push);
+    int_between_f(vars, "packet_pacing_mbps", stream.packet_pacing_mbps, {0, 10000});
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 
