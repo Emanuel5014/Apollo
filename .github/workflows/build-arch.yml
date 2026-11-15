@@ -1,0 +1,54 @@
+# streamfork: build an Arch Linux package (pacman) of this branch with docker/archlinux.dockerfile
+name: Build Arch Linux package
+
+on:
+  push:
+    branches:
+      - 'ci/**'
+  workflow_dispatch:
+
+jobs:
+  archlinux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build package
+        run: |
+          # Unit tests are not maintained for Linux in Apollo: build and package only
+          sed -i 's/^ENV _run_unit_tests=true/ENV _run_unit_tests=false/' docker/archlinux.dockerfile
+          docker buildx build \
+            --file docker/archlinux.dockerfile \
+            --target sunshine \
+            --build-arg BRANCH="${GITHUB_REF_NAME}" \
+            --build-arg BUILD_VERSION="" \
+            --build-arg COMMIT="${GITHUB_SHA}" \
+            --build-arg CLONE_URL="https://github.com/${GITHUB_REPOSITORY}.git" \
+            --tag apollo-arch \
+            --load \
+            .
+
+      - name: Extract package
+        run: |
+          id=$(docker create apollo-arch)
+          mkdir -p artifacts
+          docker cp "$id:/artifacts/." artifacts/
+          docker rm "$id"
+          short=$(echo "${GITHUB_SHA}" | cut -c1-8)
+          mv artifacts/sunshine.pkg.tar.zst "artifacts/apollo-streamfork-${short}-x86_64.pkg.tar.zst"
+          mv artifacts/sunshine.pkg.tar.gz "artifacts/apollo-streamfork-${short}-PKGBUILD.tar.gz"
+          ls -la artifacts
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Apollo-ArchLinux
+          path: artifacts/
