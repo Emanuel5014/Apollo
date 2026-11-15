@@ -636,8 +636,9 @@ namespace nvhttp {
       named_cert_p->allow_client_commands = true;
       named_cert_p->always_use_virtual_display = false;
 
-      auto it = map_id_sess.find(client.uniqueID);
-      map_id_sess.erase(it);
+      // streamfork: don't erase the pairing session here. remove_session(sess)
+      // below does it, and erasing it twice made that call hash the uniqueID of
+      // a freed session (use-after-free crash right after a successful pairing).
 
       add_authorized_client(named_cert_p);
     } else {
