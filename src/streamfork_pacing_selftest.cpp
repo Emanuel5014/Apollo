@@ -61,6 +61,7 @@ namespace {
 
   struct sim_t {
     std::chrono::nanoseconds send_time;  ///< from frame start to ratecontrol_next_frame_start
+    std::chrono::nanoseconds last_send;  ///< from frame start to the last send_batch() of the frame
     std::size_t max_burst;  ///< most packets sent without a wait in between
     std::size_t sleeps;  ///< timer->sleep_for() calls
     std::size_t batches;  ///< send_batch() calls
@@ -69,7 +70,7 @@ namespace {
 
   /// Replays the send loop of videoBroadcastThread() with instantaneous sends
   sim_t simulate(const std::vector<std::size_t> &block_packets, const pacing::rate_t &rate) {
-    sim_t sim {0ns, 0, 0, 0, 0};
+    sim_t sim {0ns, 0ns, 0, 0, 0, 0};
     std::chrono::nanoseconds now = 0ns;
     std::size_t frame_sent = 0, group_sent = 0, burst = 0;
 
@@ -92,6 +93,7 @@ namespace {
           sim.max_burst = std::max(sim.max_burst, burst);
           group_sent += batch;
           frame_sent += batch;
+          sim.last_send = now;
           next = x + 1;
         }
       }
@@ -152,9 +154,9 @@ namespace {
     check_invariants(in, r, orig, f);
     auto sim = simulate(f.block_packets, r.rate);
     auto base = simulate(f.block_packets, orig);
-    std::printf("%-26s %4d fps %5d Mbps cfg | %4zu pkts | %7.1f Mbps eff%s%s | send %6.2f ms (orig %5.2f) | group %2zu pkts/%.3f ms, batch %2zu, %3zu sleeps, max burst %3zu\n",
-                name, fps, mbps, f.total, r.rate_bps / 1e6, r.floor_raised ? " FLOOR" : "      ", r.original ? " ORIG" : "     ",
-                sim.send_time.count() / 1e6, base.send_time.count() / 1e6, r.rate.packets_per_group, r.rate.group_duration.count() / 1e6,
+    std::printf("%-26s %4d fps %5d Mbps cfg | %4zu pkts | %7.1f Mbps eff%s%s | last pkt %5.2f ms (orig %5.2f), slot end %5.2f | group %2zu pkts/%.3f ms, batch %2zu, %3zu sleeps, max burst %3zu\n",
+                name, fps, mbps, f.total, (double) r.rate.packets_per_group * blocksize * 8 * 1e3 / r.rate.group_duration.count(), r.floor_raised ? " FLOOR" : "      ", r.original ? " ORIG" : "     ",
+                sim.last_send.count() / 1e6, base.last_send.count() / 1e6, sim.send_time.count() / 1e6, r.rate.packets_per_group, r.rate.group_duration.count() / 1e6,
                 r.rate.send_batch_size, sim.sleeps, sim.max_burst);
   }
 }  // namespace
@@ -304,10 +306,13 @@ int main() {
   std::printf("%s\n", pacing::describe(1000, bs, 60).c_str());
 
   // --- numbers for the report (blocksize 1408: Moonlight packet size 1392) ---
+  // Average P-frame: rtsp.cpp lowers the encoder bitrate by the FEC share, so with fec_percentage 20 the
+  // encoder gets ~80% of the client bitrate and a frame plus its parity shards is ~bitrate / fps on the wire.
   std::printf("\n");
   for (int mbps : {0, 100, 200, 400}) {
-    report("4K60 80 Mbps P-frame", 80'000'000 / 8 / 60, 60, mbps);
-    report("4K60 30 Mbps P-frame", 30'000'000 / 8 / 60, 60, mbps);
+    report("4K60 80 Mbps P-frame", 80'000'000 / 8 * 80 / 100 / 60, 60, mbps);
+    report("4K60 30 Mbps P-frame", 30'000'000 / 8 * 80 / 100 / 60, 60, mbps);
+    report("4K60 80 Mbps 2x P-frame", 80'000'000 / 8 * 2 * 80 / 100 / 60, 60, mbps);
     report("IDR 1 MB", 1'000'000, 60, mbps);
     report("IDR 300 KB", 300'000, 60, mbps);
     report("Tiny 2 KB", 2'000, 60, mbps);
