@@ -31,6 +31,7 @@ extern "C" {
 #include "process.h"
 #include "stream.h"
 #include "streamfork_clipboard.h"
+#include "streamfork_cursor.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -58,6 +59,9 @@ extern "C" {
 #define IDX_STREAMFORK_CLIPBOARD_C2H 20
 #define IDX_STREAMFORK_HELLO 21
 #define IDX_STREAMFORK_HELLO_ACK 22
+#define IDX_STREAMFORK_CURSOR_SHAPE 23
+#define IDX_STREAMFORK_CURSOR_STATE 24
+#define IDX_STREAMFORK_CURSOR_MODE 25
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -83,6 +87,9 @@ static const short packetTypes[] = {
   streamfork::PTYPE_CLIPBOARD_C2H,  // Clipboard client->host (streamfork protocol extension)
   streamfork::PTYPE_HELLO,  // Hello (streamfork protocol extension)
   streamfork::PTYPE_HELLO_ACK,  // HelloAck (streamfork protocol extension)
+  streamfork::PTYPE_CURSOR_SHAPE,  // Cursor shape host->client (streamfork protocol extension)
+  streamfork::PTYPE_CURSOR_STATE,  // Cursor state host->client (streamfork protocol extension)
+  streamfork::PTYPE_CURSOR_MODE,  // Local cursor mode client->host (streamfork protocol extension)
 };
 
 namespace asio = boost::asio;
@@ -426,6 +433,7 @@ namespace stream {
     crypto::PERM permission;
 
     streamfork::clipboard::session_state_t streamfork_clipboard;
+    streamfork::cursor::session_state_t streamfork_cursor;
 
     std::list<crypto::command_entry_t> do_cmds;
     std::list<crypto::command_entry_t> undo_cmds;
@@ -952,8 +960,12 @@ namespace stream {
     header->payloadLength = (std::uint16_t) data.size();
     std::copy(std::begin(data), std::end(data), header->payload());
 
-    // Large enough for the biggest clipboard chunk, so it lives on the heap
-    using encrypted_payload_t = std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(control_header_v2) + streamfork::CLIPBOARD_HEADER_SIZE + streamfork::CLIPBOARD_MAX_CHUNK) + crypto::cipher::tag_size>;
+    // Large enough for the biggest clipboard or cursor shape chunk, so it lives on the heap
+    constexpr auto max_payload = std::max(streamfork::CLIPBOARD_HEADER_SIZE + streamfork::CLIPBOARD_MAX_CHUNK, streamfork::CURSOR_SHAPE_HEADER_SIZE + streamfork::CURSOR_MAX_CHUNK);
+    if (data.size() > max_payload) {
+      return -1;
+    }
+    using encrypted_payload_t = std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(control_header_v2) + max_payload) + crypto::cipher::tag_size>;
     auto encrypted_payload = std::make_unique<encrypted_payload_t>();
 
     auto payload = encode_control(session, std::string_view {(char *) plaintext.data(), plaintext.size()}, *encrypted_payload);
@@ -988,6 +1000,19 @@ namespace stream {
     }
 
     BOOST_LOG(debug) << "Pushed host clipboard to ["sv << session->device_name << "] ("sv << text->size() << " bytes)"sv;
+  }
+
+  /**
+   * @brief Send cursor shape and visibility changes to a client that draws the cursor itself.
+   */
+  void push_streamfork_cursor(session_t *session) {
+    for (const auto &message : streamfork::cursor::pending_for(session->streamfork_cursor)) {
+      if (send_streamfork_msg(session, message.type, message.payload)) {
+        // Send everything again next time
+        streamfork::cursor::resync(session->streamfork_cursor);
+        return;
+      }
+    }
   }
 
   void controlBroadcastThread(control_server_t *server) {
@@ -1124,6 +1149,7 @@ namespace stream {
                                                    !!(session->permission & crypto::PERM::clipboard_read),
                                                    !!(session->permission & crypto::PERM::clipboard_set));
       }
+      granted |= streamfork::cursor::negotiate(session->streamfork_cursor, requested);
 
       BOOST_LOG(info) << "streamfork Hello from ["sv << session->device_name << "] (version "sv << (int) version
                       << "): requested "sv << util::hex(requested).to_string_view() << ", granted "sv << util::hex(granted).to_string_view();
@@ -1133,6 +1159,23 @@ namespace stream {
       auto granted_le = util::endian::little(granted);
       ack.append((const char *) &granted_le, sizeof(granted_le));
       send_streamfork_msg(session, packetTypes[IDX_STREAMFORK_HELLO_ACK], ack);
+    });
+
+    server->map(packetTypes[IDX_STREAMFORK_CURSOR_MODE], [](session_t *session, const std::string_view &payload) {
+      if (payload.size() < 1) {
+        BOOST_LOG(warning) << "Discarding runt streamfork cursor mode"sv;
+        return;
+      }
+      if (!session->streamfork_cursor.granted) {
+        BOOST_LOG(debug) << "Ignoring cursor mode from ["sv << session->device_name << "]: local cursor not negotiated"sv;
+        return;
+      }
+
+      bool active = payload[0] != 0;
+      if (active != session->streamfork_cursor.active) {
+        BOOST_LOG(info) << "streamfork local cursor "sv << (active ? "enabled"sv : "disabled"sv) << " by ["sv << session->device_name << ']';
+      }
+      streamfork::cursor::set_active(session->streamfork_cursor, active);
     });
 
     server->map(packetTypes[IDX_STREAMFORK_CLIPBOARD_C2H], [](session_t *session, const std::string_view &payload) {
@@ -1228,6 +1271,17 @@ namespace stream {
       streamfork::clipboard::stop();
     });
 
+    // Draw the cursor in the video again once this control stream is gone
+    auto cursor_guard = util::fail_guard([]() {
+      streamfork::cursor::set_all_sessions_local(false);
+    });
+
+#ifndef NDEBUG
+    for (const auto &failure : streamfork::cursor::self_test()) {
+      BOOST_LOG(error) << "streamfork cursor self-test failed: "sv << failure;
+    }
+#endif
+
     // This thread handles latency-sensitive control messages
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
@@ -1241,6 +1295,17 @@ namespace stream {
 
       {
         auto lg = server->_sessions.lock();
+
+        // The cursor can be left out of the video only while every session draws it locally
+        bool any_session = false;
+        bool all_sessions_local_cursor = true;
+        for (auto session : *server->_sessions) {
+          if (session->state.load(std::memory_order_acquire) != session::state_e::STOPPING) {
+            any_session = true;
+            all_sessions_local_cursor = all_sessions_local_cursor && session->streamfork_cursor.active;
+          }
+        }
+        streamfork::cursor::set_all_sessions_local(any_session && all_sessions_local_cursor);
 
         auto now = std::chrono::steady_clock::now();
 
@@ -1295,6 +1360,7 @@ namespace stream {
             }
 
             push_streamfork_clipboard(session);
+            push_streamfork_cursor(session);
           }
 
           ++pos;

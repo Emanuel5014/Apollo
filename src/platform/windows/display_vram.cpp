@@ -1193,15 +1193,21 @@ namespace platf::dxgi {
           !set_cursor_texture(device.get(), cursor_xor, std::move(xor_cursor_img), shape_info)) {
         return capture_e::error;
       }
+
+      // streamfork: clients that draw the cursor themselves need the shape too
+      streamfork::cursor::publish_shape(shape_info.Type, shape_info.Width, shape_info.Height, shape_info.Pitch, shape_info.HotSpot.x, shape_info.HotSpot.y, std::begin(img_data), img_data.size());
     }
 
     if (frame_info.LastMouseUpdateTime.QuadPart) {
       cursor_alpha.set_pos(frame_info.PointerPosition.Position.x, frame_info.PointerPosition.Position.y, width, height, display_rotation, frame_info.PointerPosition.Visible);
 
       cursor_xor.set_pos(frame_info.PointerPosition.Position.x, frame_info.PointerPosition.Position.y, width, height, display_rotation, frame_info.PointerPosition.Visible);
+
+      streamfork::cursor::publish_visibility(frame_info.PointerPosition.Visible);
     }
 
-    const bool blend_mouse_cursor_flag = (cursor_alpha.visible || cursor_xor.visible) && cursor_visible;
+    // streamfork: leave the cursor out of the video while every client draws it locally
+    const bool blend_mouse_cursor_flag = (cursor_alpha.visible || cursor_xor.visible) && cursor_visible && streamfork::cursor::draw_in_video();
 
     texture2d_t src {};
     if (frame_update_flag) {

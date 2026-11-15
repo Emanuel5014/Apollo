@@ -177,6 +177,9 @@ namespace config {
 
     // Push clipboard changes between host and clients that support it (streamfork)
     bool clipboard_push;
+
+    // Send the cursor shape to clients that draw the cursor themselves (streamfork)
+    bool local_cursor;
   };
 
   struct nvhttp_t {

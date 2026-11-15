@@ -16,6 +16,7 @@
 
 // local includes
 #include "src/platform/common.h"
+#include "src/streamfork_cursor.h"
 #include "src/utility.h"
 #include "src/video.h"
 
@@ -308,6 +309,7 @@ namespace platf::dxgi {
 
     duplication_t dup;
     cursor_t cursor;
+    streamfork::cursor::source_t streamfork_cursor_source;  ///< We publish the cursor shape for streamfork clients
   };
 
   /**
@@ -331,6 +333,7 @@ namespace platf::dxgi {
 
     gpu_cursor_t cursor_alpha;
     gpu_cursor_t cursor_xor;
+    streamfork::cursor::source_t streamfork_cursor_source;  ///< We publish the cursor shape for streamfork clients
 
     texture2d_t old_surface_delayed_destruction;
     std::chrono::steady_clock::time_point old_surface_timestamp;

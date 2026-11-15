@@ -206,12 +206,17 @@ namespace platf::dxgi {
 
         return capture_e::error;
       }
+
+      // streamfork: clients that draw the cursor themselves need the shape too
+      streamfork::cursor::publish_shape(cursor.shape_info.Type, cursor.shape_info.Width, cursor.shape_info.Height, cursor.shape_info.Pitch, cursor.shape_info.HotSpot.x, cursor.shape_info.HotSpot.y, img_data.data(), img_data.size());
     }
 
     if (frame_info.LastMouseUpdateTime.QuadPart) {
       cursor.x = frame_info.PointerPosition.Position.x;
       cursor.y = frame_info.PointerPosition.Position.y;
       cursor.visible = frame_info.PointerPosition.Visible;
+
+      streamfork::cursor::publish_visibility(cursor.visible);
     }
 
     if (frame_update_flag) {
@@ -304,7 +309,8 @@ namespace platf::dxgi {
       img_info.pData = nullptr;
     }
 
-    if (cursor_visible && cursor.visible) {
+    // streamfork: leave the cursor out of the video while every client draws it locally
+    if (cursor_visible && cursor.visible && streamfork::cursor::draw_in_video()) {
       blend_cursor(cursor, *img);
     }
 
