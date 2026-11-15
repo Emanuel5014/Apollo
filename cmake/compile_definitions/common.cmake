@@ -94,6 +94,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/streamfork_cursor.cpp"
         "${CMAKE_SOURCE_DIR}/src/streamfork_cursor.h"
         "${CMAKE_SOURCE_DIR}/src/streamfork_cursor_image.cpp"
+        "${CMAKE_SOURCE_DIR}/src/streamfork_pacing.cpp"
+        "${CMAKE_SOURCE_DIR}/src/streamfork_pacing.h"
         "${CMAKE_SOURCE_DIR}/src/video.cpp"
         "${CMAKE_SOURCE_DIR}/src/video.h"
         "${CMAKE_SOURCE_DIR}/src/video_colorspace.cpp"

@@ -180,6 +180,9 @@ namespace config {
 
     // Send the cursor shape to clients that draw the cursor themselves (streamfork)
     bool local_cursor;
+
+    // Spread each video frame at this rate instead of ~800 Mbps, 0 = off (streamfork, see streamfork_pacing.h)
+    int packet_pacing_mbps;
   };
 
   struct nvhttp_t {
